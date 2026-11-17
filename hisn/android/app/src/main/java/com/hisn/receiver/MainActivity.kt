@@ -5,27 +5,147 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.util.Base64
 import android.view.Gravity
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.widget.*
+import java.security.MessageDigest
+import java.security.SecureRandom
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
 
 class MainActivity : Activity() {
     private val navy = Color.rgb(16, 38, 69)
     private val blue = Color.rgb(34, 105, 165)
     private val muted = Color.rgb(95, 111, 128)
+    private val prefs by lazy { getSharedPreferences("hisn_local_security", MODE_PRIVATE) }
+    private var unlocked = false
+    private var lockWhenResumed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = navy
         window.navigationBarColor = navy
+        showPinGate()
+    }
 
-        val page = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(22), dp(20), dp(24))
-            setBackgroundColor(Color.rgb(247, 249, 252))
+    override fun onStop() {
+        super.onStop()
+        if (unlocked && !isFinishing) lockWhenResumed = true
+    }
+
+    override fun onRestart() {
+        super.onRestart()
+        if (lockWhenResumed) {
+            lockWhenResumed = false
+            unlocked = false
+            showPinGate()
         }
-        val scroll = ScrollView(this).apply { addView(page) }
+    }
 
+    private fun showPinGate() {
+        val hasPin = prefs.contains("pin_hash") && prefs.contains("pin_salt")
+        val page = basePage()
+        page.gravity = Gravity.CENTER_HORIZONTAL
+        page.addView(space(44))
+        page.addView(label("حِصن", 34, navy, true))
+        page.addView(label(if (hasPin) "التطبيق محمي" else "إنشاء رمز حماية", 20, navy, true))
+        page.addView(label(
+            if (hasPin) "أدخل رمز PIN لفتح لوحة حِصن."
+            else "أنشئ رمزاً من 6 أرقام. سيُطلب عند فتح التطبيق والعودة إليه.",
+            14, muted, false
+        ))
+        page.addView(space(18))
+
+        val pin = EditText(this).apply {
+            hint = "رمز من 6 أرقام"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            textSize = 20f
+            gravity = Gravity.CENTER
+            letterSpacing = 0.35f
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(Color.WHITE)
+        }
+        page.addView(pin, LinearLayout.LayoutParams(-1, dp(56)))
+
+        val confirm = if (hasPin) null else EditText(this).apply {
+            hint = "تأكيد الرمز"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            textSize = 20f
+            gravity = Gravity.CENTER
+            letterSpacing = 0.35f
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(Color.WHITE)
+        }
+        if (confirm != null) {
+            page.addView(space(10))
+            page.addView(confirm, LinearLayout.LayoutParams(-1, dp(56)))
+        }
+        page.addView(space(14))
+        val message = label("", 13, Color.rgb(184, 72, 55), false)
+        page.addView(message)
+
+        page.addView(button(if (hasPin) "فتح حِصن" else "حفظ رمز الحماية") {
+            val entered = pin.text.toString()
+            if (!entered.matches(Regex("\\d{6}"))) {
+                message.text = "أدخل 6 أرقام بالضبط."
+                return@button
+            }
+            if (!hasPin) {
+                if (confirm?.text?.toString() != entered) {
+                    message.text = "الرمزان غير متطابقين."
+                    return@button
+                }
+                savePin(entered)
+                unlocked = true
+                showDashboard()
+            } else {
+                if (verifyPin(entered)) {
+                    unlocked = true
+                    showDashboard()
+                } else {
+                    message.text = "الرمز غير صحيح. حاول مرة أخرى."
+                    pin.text.clear()
+                }
+            }
+        })
+        page.addView(space(18))
+        page.addView(label("رمز الحماية يُحفظ محلياً على هذا الهاتف، ولا يُرفع إلى GitHub أو الخادم.", 12, muted, false))
+        setContentView(ScrollView(this).apply { addView(page) })
+    }
+
+    private fun savePin(pin: String) {
+        val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        val hash = derivePinHash(pin, salt)
+        prefs.edit()
+            .putString("pin_salt", Base64.encodeToString(salt, Base64.NO_WRAP))
+            .putString("pin_hash", Base64.encodeToString(hash, Base64.NO_WRAP))
+            .apply()
+    }
+
+    private fun verifyPin(pin: String): Boolean {
+        val saltText = prefs.getString("pin_salt", null) ?: return false
+        val hashText = prefs.getString("pin_hash", null) ?: return false
+        val salt = Base64.decode(saltText, Base64.NO_WRAP)
+        val expected = Base64.decode(hashText, Base64.NO_WRAP)
+        val actual = derivePinHash(pin, salt)
+        return MessageDigest.isEqual(expected, actual)
+    }
+
+    private fun derivePinHash(pin: String, salt: ByteArray): ByteArray {
+        val spec = PBEKeySpec(pin.toCharArray(), salt, 120_000, 256)
+        return try {
+            SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        } finally {
+            spec.clearPassword()
+        }
+    }
+
+    private fun showDashboard() {
+        val page = basePage()
         page.addView(label("حِصن", 30, navy, true))
         page.addView(label("لوحة مشاهدة شاشة iPhone", 15, muted, false))
         page.addView(space(20))
@@ -49,7 +169,7 @@ class MainActivity : Activity() {
         }
         pairing.addView(code, LinearLayout.LayoutParams(-1, dp(52)))
         pairing.addView(button("ربط الجهاز") {
-            Toast.makeText(this, "واجهة أولية: لم تُنفذ خدمة الاقتران بعد.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "الواجهة أولية: خدمة الاقتران لم تُنفذ بعد.", Toast.LENGTH_LONG).show()
         })
         page.addView(pairing)
 
@@ -57,7 +177,7 @@ class MainActivity : Activity() {
         val session = card()
         session.addView(label("جلسة المشاهدة", 17, navy, true))
         session.addView(button("طلب بدء المشاهدة") {
-            Toast.makeText(this, "سيعمل الزر بعد إضافة WebRTC وربط جلسة iPhone.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "سيعمل بعد إضافة WebRTC وربط جلسة iPhone.", Toast.LENGTH_LONG).show()
         })
         session.addView(button("إنهاء الجلسة") {
             Toast.makeText(this, "لا توجد جلسة فعلية نشطة حالياً.", Toast.LENGTH_SHORT).show()
@@ -65,11 +185,23 @@ class MainActivity : Activity() {
         page.addView(session)
 
         page.addView(space(18))
-        page.addView(label("تنبيه الخصوصية", 15, navy, true))
+        page.addView(label("حماية التطبيق", 15, navy, true))
+        page.addView(label("يُطلب رمز PIN عند فتح حِصن وعند العودة إليه بعد الانتقال لتطبيق آخر.", 13, muted, false))
+        page.addView(button("قفل التطبيق الآن") {
+            unlocked = false
+            showPinGate()
+        })
+        page.addView(space(12))
         page.addView(label("يظل مؤشر مشاركة الشاشة وموافقة بدء البث خاضعين لنظام iOS. لا يدعم حِصن بثاً خفياً أو تجاوزاً لتنبيهات النظام.", 13, muted, false))
         page.addView(space(10))
-        page.addView(label("الإصدار 0.3 — واجهة أولية غير متصلة ببث فعلي.", 12, muted, false))
-        setContentView(scroll)
+        page.addView(label("الإصدار 0.4 — حماية PIN مضافة؛ البث الفعلي غير منفذ بعد.", 12, muted, false))
+        setContentView(ScrollView(this).apply { addView(page) })
+    }
+
+    private fun basePage() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(20), dp(22), dp(20), dp(24))
+        setBackgroundColor(Color.rgb(247, 249, 252))
     }
 
     private fun card() = LinearLayout(this).apply {
